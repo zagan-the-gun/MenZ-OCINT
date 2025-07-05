@@ -8,7 +8,7 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get install -y \
     # ペネトレーションテスト
     nmap nikto \
     # ネットワーク調査
-    wireshark-common tcpdump netcat-traditional dnsutils \
+    wireshark-common tcpdump netcat-traditional dnsutils iputils-ping \
     # リバースエンジニアリング
     binwalk \
     # Web調査
@@ -44,12 +44,16 @@ RUN pip3 install --no-cache-dir -r requirements.txt
 
 # アプリケーションコードのコピー
 COPY app/ ./
+COPY test_docker.py ./
 
 # データディレクトリの作成
 RUN mkdir -p /data /logs
 
 # ポート公開
-EXPOSE 8000
+EXPOSE 8501
+
+# 環境変数の設定
+ENV PYTHONPATH=/app
 
 # アプリケーションの起動
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"] 
+CMD ["streamlit", "run", "main.py", "--server.address", "0.0.0.0", "--server.port", "8501", "--server.headless", "true"] 

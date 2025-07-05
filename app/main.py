@@ -1,469 +1,251 @@
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
-import subprocess
-import asyncio
-import json
-import os
-from typing import Dict, List, Optional, Any
-import logging
-import requests
+"""
+OSINT Investigation Chat Interface
+LangChain-based OSINT system with Streamlit UI
+"""
 
-# ログ設定
+import streamlit as st
+import logging
+import os
+from typing import Optional, Dict, Any
+from datetime import datetime
+
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('/logs/mcp-server.log'),
-        logging.StreamHandler()
-    ]
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI(
-    title="MCP OSINT Server",
-    description="Model Context Protocol Server for OSINT investigations",
-    version="1.0.0"
+# Import our modules
+from agents.osint_agent import get_osint_agent, reset_osint_agent
+from config.llm_config import LLMConfig, get_provider_info, AVAILABLE_PROVIDERS
+
+# Page configuration
+st.set_page_config(
+    page_title="MenZ-OSINT Agent",
+    page_icon="🔍",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-# MCPリクエストモデル
-class MCPRequest(BaseModel):
-    jsonrpc: str = "2.0"
-    method: str
-    params: Optional[Dict[str, Any]] = None
-    id: Optional[str] = None
+# Initialize session state
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "agent" not in st.session_state:
+    st.session_state.agent = None
+if "llm_config" not in st.session_state:
+    st.session_state.llm_config = None
 
-class MCPResponse(BaseModel):
-    jsonrpc: str = "2.0"
-    result: Optional[Any] = None
-    error: Optional[Dict[str, Any]] = None
-    id: Optional[str] = None
-
-# 許可されたコマンドのリスト（セキュリティ制限）
-ALLOWED_COMMANDS = [
-    "nmap", "nikto", "whois", "dig", "curl", "wget", 
-    "radare2", "binwalk", "volatility3", "tcpdump", "sqlmap"
-]
-
-@app.get("/")
-async def root():
-    return {"message": "MCP OSINT Server is running"}
-
-@app.get("/health")
-async def health_check():
-    return {"status": "healthy", "service": "mcp-osint-server"}
-
-@app.post("/mcp")
-async def handle_mcp_request(request: MCPRequest):
-    """MCPプロトコルのメインエンドポイント"""
+def initialize_agent(llm_config: LLMConfig) -> bool:
+    """Initialize the OSINT agent"""
     try:
-        logger.info(f"Received MCP request: {request.method}")
+        # Reset the global agent to force new initialization
+        reset_osint_agent()
         
-        if request.method == "tools/list":
-            return await list_tools(request)
-        elif request.method == "tools/call":
-            return await call_tool(request)
-        elif request.method == "initialize":
-            return await initialize(request)
+        # Initialize new agent
+        st.session_state.agent = get_osint_agent(llm_config)
+        st.session_state.llm_config = llm_config
+        
+        # Debug: Show agent tools
+        if hasattr(st.session_state.agent, 'tools'):
+            tool_names = [tool.name for tool in st.session_state.agent.tools]
+            st.info(f"Debug: Available tools: {tool_names}")
+        elif hasattr(st.session_state.agent, 'agent') and hasattr(st.session_state.agent.agent, 'tools'):
+            tool_names = [tool.name for tool in st.session_state.agent.agent.tools]
+            st.info(f"Debug: Available tools: {tool_names}")
         else:
-            raise HTTPException(status_code=400, detail=f"Unknown method: {request.method}")
-    
+            st.warning("Debug: Could not find tools in agent")
+        
+        return True
     except Exception as e:
-        logger.error(f"Error handling MCP request: {str(e)}")
-        return MCPResponse(
-            error={"code": -32603, "message": f"Internal error: {str(e)}"},
-            id=request.id
-        )
+        st.error(f"Failed to initialize agent: {str(e)}")
+        import traceback
+        st.code(traceback.format_exc())
+        return False
 
-async def initialize(request: MCPRequest):
-    """MCP初期化"""
-    return MCPResponse(
-        result={
-            "protocolVersion": "2024-11-05",
-            "capabilities": {
-                "tools": {}
-            },
-            "serverInfo": {
-                "name": "mcp-osint-server",
-                "version": "1.0.0"
-            }
-        },
-        id=request.id
-    )
-
-async def list_tools(request: MCPRequest):
-    """利用可能なツールのリスト"""
-    tools = [
-        {
-            "name": "nmap_scan",
-            "description": "ネットワークスキャンを実行",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "target": {"type": "string", "description": "スキャン対象のIPまたはドメイン"},
-                    "options": {"type": "string", "description": "nmapオプション"}
-                },
-                "required": ["target"]
-            }
-        },
-        {
-            "name": "whois_lookup",
-            "description": "ドメインのWHOIS情報を取得",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "domain": {"type": "string", "description": "調査対象のドメイン"}
-                },
-                "required": ["domain"]
-            }
-        },
-        {
-            "name": "execute_command",
-            "description": "許可されたセキュリティコマンドを実行",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "command": {"type": "string", "description": "実行するコマンド"},
-                    "args": {"type": "array", "items": {"type": "string"}, "description": "コマンド引数"}
-                },
-                "required": ["command"]
-            }
-        }
-    ]
+def main():
+    """Main application"""
     
-    return MCPResponse(
-        result={"tools": tools},
-        id=request.id
-    )
-
-async def call_tool(request: MCPRequest):
-    """ツールの実行"""
-    if not request.params:
-        raise HTTPException(status_code=400, detail="Missing params")
+    # Header
+    st.title("🔍 MenZ-OSINT Agent")
+    st.markdown("**LangChain-powered OSINT Investigation Assistant**")
+    st.markdown("---")
     
-    tool_name = request.params.get("name")
-    arguments = request.params.get("arguments", {})
-    
-    if tool_name == "nmap_scan":
-        return await execute_nmap(arguments, request.id)
-    elif tool_name == "whois_lookup":
-        return await execute_whois(arguments, request.id)
-    elif tool_name == "execute_command":
-        return await execute_system_command(arguments, request.id)
-    else:
-        raise HTTPException(status_code=400, detail=f"Unknown tool: {tool_name}")
-
-async def execute_nmap(arguments: dict, request_id: str):
-    """Nmapスキャンの実行"""
-    target = arguments.get("target")
-    options = arguments.get("options", "-sS")
-    
-    if not target:
-        return MCPResponse(
-            error={"code": -32602, "message": "Missing target parameter"},
-            id=request_id
-        )
-    
-    try:
-        cmd = ["nmap"] + options.split() + [target]
-        result = await run_command(cmd)
+    # Sidebar for configuration
+    with st.sidebar:
+        st.header("🛠️ Configuration")
         
-        return MCPResponse(
-            result={
-                "content": [
-                    {
-                        "type": "text",
-                        "text": f"Nmap scan results for {target}:\n\n{result}"
-                    }
-                ]
-            },
-            id=request_id
-        )
-    except Exception as e:
-        return MCPResponse(
-            error={"code": -32603, "message": f"Nmap execution failed: {str(e)}"},
-            id=request_id
-        )
-
-async def execute_whois(arguments: dict, request_id: str):
-    """WHOIS情報の取得"""
-    domain = arguments.get("domain")
-    
-    if not domain:
-        return MCPResponse(
-            error={"code": -32602, "message": "Missing domain parameter"},
-            id=request_id
-        )
-    
-    try:
-        cmd = ["whois", domain]
-        result = await run_command(cmd)
+        # LLM Provider Selection
+        provider_info = get_provider_info()
+        provider_names = {k: v["name"] for k, v in provider_info.items()}
         
-        return MCPResponse(
-            result={
-                "content": [
-                    {
-                        "type": "text",
-                        "text": f"WHOIS information for {domain}:\n\n{result}"
-                    }
-                ]
-            },
-            id=request_id
-        )
-    except Exception as e:
-        return MCPResponse(
-            error={"code": -32603, "message": f"WHOIS lookup failed: {str(e)}"},
-            id=request_id
-        )
-
-async def execute_system_command(arguments: dict, request_id: str):
-    """システムコマンドの実行（セキュリティ制限付き）"""
-    command = arguments.get("command")
-    args = arguments.get("args", [])
-    
-    if not command:
-        return MCPResponse(
-            error={"code": -32602, "message": "Missing command parameter"},
-            id=request_id
-        )
-    
-    # セキュリティチェック
-    if command not in ALLOWED_COMMANDS:
-        return MCPResponse(
-            error={"code": -32602, "message": f"Command '{command}' not allowed"},
-            id=request_id
-        )
-    
-    try:
-        cmd = [command] + args
-        result = await run_command(cmd)
-        
-        return MCPResponse(
-            result={
-                "content": [
-                    {
-                        "type": "text",
-                        "text": f"Command '{' '.join(cmd)}' output:\n\n{result}"
-                    }
-                ]
-            },
-            id=request_id
-        )
-    except Exception as e:
-        return MCPResponse(
-            error={"code": -32603, "message": f"Command execution failed: {str(e)}"},
-            id=request_id
-        )
-
-async def run_command(cmd: List[str], timeout: int = 60):
-    """コマンドの非同期実行"""
-    try:
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+        selected_provider = st.selectbox(
+            "Select LLM Provider",
+            options=list(provider_names.keys()),
+            format_func=lambda x: provider_names[x],
+            index=0
         )
         
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+        # Model Selection
+        available_models = provider_info[selected_provider]["models"]
+        selected_model = st.selectbox(
+            "Select Model",
+            options=available_models,
+            index=0
+        )
         
-        if process.returncode != 0:
-            raise Exception(f"Command failed with return code {process.returncode}: {stderr.decode()}")
+        # API Key Input (if required)
+        api_key = ""
+        if provider_info[selected_provider]["requires_api_key"]:
+            env_var = provider_info[selected_provider]["env_var"]
+            api_key = st.text_input(
+                f"API Key ({env_var})",
+                type="password",
+                help=f"Enter your {provider_names[selected_provider]} API key"
+            )
         
-        return stdout.decode()
-    except asyncio.TimeoutError:
-        raise Exception(f"Command timed out after {timeout} seconds")
-    except Exception as e:
-        raise Exception(f"Command execution error: {str(e)}")
-
-# ChatGPT/Gemini用の簡単なエンドポイントを追加
-class SimpleOSINTRequest(BaseModel):
-    target: str
-    investigation_type: str = "domain"
-    tools: List[str] = ["whois", "nmap", "dns"]
-
-class SimpleOSINTResponse(BaseModel):
-    success: bool
-    summary: str
-    details: Dict[str, Any]
-    recommendations: List[str]
-
-@app.post("/investigate", response_model=SimpleOSINTResponse)
-async def simple_investigate(request: SimpleOSINTRequest):
-    """
-    ChatGPT/Gemini向けのシンプルなOSINT調査API
-    既存のMCPサーバー機能を活用
-    """
-    try:
-        results = {}
+        # Advanced Settings
+        st.subheader("Advanced Settings")
+        temperature = st.slider("Temperature", 0.0, 1.0, 0.1, 0.1)
+        max_tokens = st.slider("Max Tokens", 100, 4000, 2000, 100)
         
-        # 1. WHOIS調査
-        if "whois" in request.tools:
-            try:
-                whois_args = {"domain": request.target}
-                whois_result = await execute_whois(whois_args, "whois_simple")
-                if hasattr(whois_result, 'result'):
-                    results["whois"] = whois_result.result if whois_result.result else {"error": "No result"}
-                else:
-                    results["whois"] = whois_result
-            except Exception as e:
-                results["whois"] = {"error": str(e)}
-        
-        # 2. Nmap調査
-        if "nmap" in request.tools:
-            try:
-                nmap_args = {"target": request.target, "options": "-sS -p 80,443,8080"}
-                nmap_result = await execute_nmap(nmap_args, "nmap_simple")
-                if hasattr(nmap_result, 'result'):
-                    results["nmap"] = nmap_result.result if nmap_result.result else {"error": "No result"}
-                else:
-                    results["nmap"] = nmap_result
-            except Exception as e:
-                results["nmap"] = {"error": str(e)}
-        
-        # 3. DNS調査
-        if "dns" in request.tools:
-            try:
-                dns_args = {"command": "dig", "args": [request.target, "ANY"]}
-                dns_result = await execute_system_command(dns_args, "dns_simple")
-                if hasattr(dns_result, 'result'):
-                    results["dns"] = dns_result.result if dns_result.result else {"error": "No result"}
-                else:
-                    results["dns"] = dns_result
-            except Exception as e:
-                results["dns"] = {"error": str(e)}
-        
-        # 結果の解析とサマリー生成
-        summary = f"🔍 {request.target} の調査結果:\n\n"
-        
-        # WHOIS結果の分析
-        if "whois" in results and "error" not in results["whois"]:
-            summary += "✅ WHOIS情報: 正常に取得されました\n"
-        else:
-            summary += "❌ WHOIS情報: 取得に失敗しました\n"
-        
-        # Nmap結果の分析
-        if "nmap" in results and "error" not in results["nmap"]:
-            nmap_content = results["nmap"].get("content", []) if isinstance(results["nmap"], dict) else []
-            if nmap_content and "open" in str(nmap_content):
-                summary += "⚠️  開放ポートが検出されました\n"
+        # Initialize Agent Button
+        if st.button("Initialize Agent", type="primary"):
+            if provider_info[selected_provider]["requires_api_key"] and not api_key:
+                st.error("API key is required for this provider")
             else:
-                summary += "✅ 開放ポートは検出されませんでした\n"
+                # Set environment variables
+                if api_key:
+                    if selected_provider == "openai":
+                        os.environ["LLM_API_KEY"] = api_key
+                    elif selected_provider == "claude":
+                        os.environ["CLAUDE_API_KEY"] = api_key
+                    elif selected_provider == "gemini":
+                        os.environ["GEMINI_API_KEY"] = api_key
+                
+                # Set other environment variables
+                os.environ["LLM_PROVIDER"] = selected_provider
+                os.environ["LLM_MODEL"] = selected_model
+                os.environ["LLM_TEMPERATURE"] = str(temperature)
+                os.environ["LLM_MAX_TOKENS"] = str(max_tokens)
+                
+                # Debug: Show configuration
+                st.info(f"Debug: Provider={selected_provider}, Model={selected_model}")
+                if selected_provider == "gemini":
+                    st.info(f"Debug: Gemini API Key set: {bool(os.environ.get('GEMINI_API_KEY'))}")
+                
+                # Create LLM config
+                try:
+                    llm_config = LLMConfig()
+                    
+                    # Test LLM initialization
+                    test_llm = llm_config.get_llm()
+                    st.info(f"Debug: LLM type: {type(test_llm)}")
+                    
+                    # Initialize agent
+                    if initialize_agent(llm_config):
+                        st.success(f"Agent initialized with {provider_names[selected_provider]}!")
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Configuration error: {str(e)}")
+                    st.error(f"Debug: Exception type: {type(e)}")
+                    import traceback
+                    st.code(traceback.format_exc())
+        
+        # Agent Status
+        st.subheader("Agent Status")
+        if st.session_state.agent:
+            st.success("✅ Agent Ready")
+            st.info(f"Provider: {st.session_state.llm_config.provider}")
+            st.info(f"Model: {st.session_state.llm_config.model_name}")
         else:
-            summary += "❌ ポートスキャン: 実行に失敗しました\n"
+            st.warning("⚠️ Agent Not Initialized")
         
-        # DNS結果の分析
-        if "dns" in results and "error" not in results["dns"]:
-            summary += "✅ DNS情報: 正常に取得されました\n"
-        else:
-            summary += "❌ DNS情報: 取得に失敗しました\n"
+        # Clear Memory Button
+        if st.session_state.agent:
+            if st.button("Clear Memory"):
+                st.session_state.agent.clear_memory()
+                st.session_state.messages = []
+                st.success("Memory cleared!")
+                st.rerun()
         
-        # 推奨事項の生成
-        recommendations = []
-        if "nmap" in results and "error" not in results["nmap"]:
-            nmap_content = results["nmap"].get("content", []) if isinstance(results["nmap"], dict) else []
-            if nmap_content and "open" in str(nmap_content):
-                recommendations.append("開放ポートが検出されました。不要なサービスは停止を検討してください。")
-                recommendations.append("ファイアウォール設定の見直しを推奨します。")
-        
-        recommendations.extend([
-            "定期的なセキュリティ監査を実施してください。",
-            "脆弱性スキャンを定期的に実行してください。"
-        ])
-        
-        return SimpleOSINTResponse(
-            success=True,
-            summary=summary,
-            details=results,
-            recommendations=recommendations
-        )
+        # Available Tools
+        st.subheader("Available Tools")
+        st.markdown("""
+        - **🔍 Nmap Scan** - Network reconnaissance
+        - **📋 Whois Lookup** - Domain registration info
+        - **🌐 DNS Lookup** - DNS record queries
+        - **🏓 Ping Test** - Network connectivity test
+        - **⚡ Command Execution** - Security tools
+        """)
     
-    except Exception as e:
-        logger.error(f"Simple investigate error: {str(e)}")
-        return SimpleOSINTResponse(
-            success=False,
-            summary=f"調査中にエラーが発生しました: {str(e)}",
-            details={"error": str(e)},
-            recommendations=["エラーログを確認してください。"]
-        )
+    # Main chat interface
+    if not st.session_state.agent:
+        st.info("👈 Please configure and initialize the agent in the sidebar to begin.")
+        st.markdown("""
+        ### Welcome to MenZ-OSINT Agent!
+        
+        This is a LangChain-powered OSINT investigation assistant that can help you:
+        
+        - 🔍 **Network Reconnaissance** - Scan ports and services
+        - 📋 **Domain Intelligence** - Gather domain registration information
+        - 🌐 **DNS Analysis** - Query various DNS records
+        - ⚡ **Tool Execution** - Run security tools in a safe environment
+        
+        **Example investigations:**
+        - "Investigate google.com"
+        - "Perform a comprehensive scan of 192.168.1.1"
+        - "Find all DNS records for example.com"
+        - "Check what services are running on port 80 for github.com"
+        """)
+        return
+    
+    # Display chat messages
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+            if "timestamp" in message:
+                st.caption(f"⏰ {message['timestamp']}")
+    
+    # Chat input
+    if prompt := st.chat_input("What would you like to investigate?"):
+        # Add user message
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        st.session_state.messages.append({
+            "role": "user", 
+            "content": prompt,
+            "timestamp": timestamp
+        })
+        
+        # Display user message
+        with st.chat_message("user"):
+            st.markdown(prompt)
+            st.caption(f"⏰ {timestamp}")
+        
+        # Get agent response
+        with st.chat_message("assistant"):
+            with st.spinner("🔍 Investigating..."):
+                try:
+                    response = st.session_state.agent.run(prompt)
+                    st.markdown(response)
+                    
+                    # Add assistant message
+                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    st.session_state.messages.append({
+                        "role": "assistant", 
+                        "content": response,
+                        "timestamp": timestamp
+                    })
+                    st.caption(f"⏰ {timestamp}")
+                    
+                except Exception as e:
+                    error_msg = f"Error during investigation: {str(e)}"
+                    st.error(error_msg)
+                    st.session_state.messages.append({
+                        "role": "assistant", 
+                        "content": error_msg,
+                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    })
 
-@app.get("/chatgpt-config")
-async def get_chatgpt_config():
-    """
-    ChatGPT Custom GPT用の設定情報を提供
-    """
-    return {
-        "openapi_schema": {
-            "openapi": "3.0.0",
-            "info": {
-                "title": "OSINT Investigation API",
-                "description": "セキュリティ調査とOSINT分析を実行するAPI",
-                "version": "1.0.0"
-            },
-            "servers": [
-                {"url": "http://localhost:8000"}
-            ],
-            "paths": {
-                "/investigate": {
-                    "post": {
-                        "operationId": "investigate_target",
-                        "summary": "OSINT調査を実行",
-                        "requestBody": {
-                            "required": True,
-                            "content": {
-                                "application/json": {
-                                    "schema": {
-                                        "type": "object",
-                                        "properties": {
-                                            "target": {
-                                                "type": "string",
-                                                "description": "調査対象（ドメイン、IPアドレス等）"
-                                            },
-                                            "investigation_type": {
-                                                "type": "string",
-                                                "description": "調査タイプ",
-                                                "enum": ["domain", "ip", "url"]
-                                            },
-                                            "tools": {
-                                                "type": "array",
-                                                "description": "使用するツール",
-                                                "items": {
-                                                    "type": "string",
-                                                    "enum": ["whois", "nmap", "dns"]
-                                                }
-                                            }
-                                        },
-                                        "required": ["target"]
-                                    }
-                                }
-                            }
-                        },
-                        "responses": {
-                            "200": {
-                                "description": "調査結果",
-                                "content": {
-                                    "application/json": {
-                                        "schema": {
-                                            "type": "object",
-                                            "properties": {
-                                                "success": {"type": "boolean"},
-                                                "summary": {"type": "string"},
-                                                "details": {"type": "object"},
-                                                "recommendations": {
-                                                    "type": "array",
-                                                    "items": {"type": "string"}
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000) 
+# Run the main application
+main()
