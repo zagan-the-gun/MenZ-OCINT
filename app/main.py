@@ -175,6 +175,8 @@ def main():
         - **🔍 Nmap Scan** - Network reconnaissance
         - **📋 Whois Lookup** - Domain registration info
         - **🌐 DNS Lookup** - DNS record queries
+        - **📜 DNS History** - Historical DNS records & Certificate Transparency
+        - **🌍 Web History** - Certificate Transparency + Wayback Machine (サブドメイン検出)
         - **🏓 Ping Test** - Network connectivity test
         - **⚡ Command Execution** - Security tools
         """)
@@ -194,8 +196,10 @@ def main():
         
         **Example investigations:**
         - "Investigate google.com"
+        - "magn8soft.tokyoのサブドメインを全て教えて下さい"
         - "Perform a comprehensive scan of 192.168.1.1"
         - "Find all DNS records for example.com"
+        - "example.comの過去の履歴を詳細に調査してください"
         - "Check what services are running on port 80 for github.com"
         """)
         return

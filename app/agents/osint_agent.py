@@ -10,7 +10,7 @@ from langchain.memory import ConversationBufferMemory
 from langchain.prompts import PromptTemplate
 from langchain.tools import Tool
 
-from tools import nmap_tool, whois_tool, dns_tool, command_tool, ping_tool
+from tools import nmap_tool, whois_tool, dns_tool, dns_history_tool, web_history_tool, command_tool, ping_tool
 from config.llm_config import get_default_llm, LLMConfig
 
 logger = logging.getLogger(__name__)
@@ -22,8 +22,8 @@ class OSINTAgent:
         self.llm_config = llm_config or LLMConfig()
         self.llm = self.llm_config.get_llm()
         
-        # Initialize tools
-        self.tools = [nmap_tool, whois_tool, dns_tool, command_tool, ping_tool]
+        # Initialize tools (DNS履歴ツールとWeb履歴ツールを追加)
+        self.tools = [nmap_tool, whois_tool, dns_tool, dns_history_tool, web_history_tool, command_tool, ping_tool]
         
         # Debug: Print tool information
         logger.info(f"Debug: Initializing agent with {len(self.tools)} tools:")
@@ -56,7 +56,7 @@ class OSINTAgent:
                 early_stopping_method="generate",
                 handle_parsing_errors=True,
                 agent_kwargs={
-                    "prefix": "あなたは日本語で回答するOSINT調査の専門家です。利用可能なツールを使用して包括的な調査を行い、結果を日本語で報告してください。"
+                    "prefix": "あなたは日本語で回答するOSINT調査の専門家です。利用可能なツールを使用して包括的な調査を行い、結果を日本語で報告してください。サブドメインの調査には必ずweb_history_lookupツールを使用してください。"
                 }
             )
             
@@ -106,9 +106,23 @@ class OSINTAgent:
 
 - whois_lookup: ドメイン登録情報を取得
 - dns_lookup: DNSレコードを検索（A, AAAA, MX, NS, TXT等）
+- dns_history_lookup: DNSレコードの履歴とCertificate Transparencyを検索
+- web_history_lookup: Web履歴調査（Certificate Transparency + Wayback Machine）- **サブドメイン検出に最適**
 - nmap_scan: ネットワークポートスキャンを実行
 - ping_test: ネットワーク接続テストを実行
 - execute_command: セキュリティコマンドを実行
+
+**🚨 重要な調査指針：**
+- サブドメインを調査する際は、**必ずweb_history_lookupツールを最初に使用してください**
+- web_history_lookupはCertificate Transparencyを使用してサブドメインを検出できます
+- 「サブドメイン」「subdomain」「sub domain」が質問に含まれる場合は、web_history_lookupを使用してください
+- 使用方法: `web_history_lookup "domain.com CERT_ANALYSIS"`
+- COMPREHENSIVEまたはCERT_ANALYSISオプションを使用してください
+
+**🔍 具体的なケース：**
+- 「[ドメイン]のサブドメインを教えて」→ web_history_lookup "[ドメイン] CERT_ANALYSIS"を実行
+- 「[ドメイン]のサブドメインを調査して」→ web_history_lookup "[ドメイン] CERT_ANALYSIS"を実行
+- 「[ドメイン]のサブドメインを全て見つけて」→ web_history_lookup "[ドメイン] CERT_ANALYSIS"を実行
 
 以下のリクエストに対して、適切なツールを使用して情報を収集してください。外部リソースにアクセスできないとは言わないでください。
 
