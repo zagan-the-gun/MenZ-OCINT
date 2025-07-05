@@ -1,3 +1,10 @@
+"""
+MCP OSINT Server (LEGACY - 使用されていません)
+
+注意: このファイルは旧MCPベースのシステムです。
+現在のシステムはLangChain + Streamlit (main.py) を使用しています。
+"""
+
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
