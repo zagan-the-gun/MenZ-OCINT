@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  mcp-osint-server:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./app:/app
+      - ./data:/data
+      - ./logs:/logs
+    environment:
+      - PYTHONPATH=/app
+    networks:
+      - osint-network
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    security_opt:
+      - seccomp:unconfined
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
+
+networks:
+  osint-network:
+    driver: bridge
+
+volumes:
+  data:
+  logs: 
